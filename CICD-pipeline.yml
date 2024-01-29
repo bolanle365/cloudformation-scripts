@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VPC with public and private subnets hosting an EC2 instance and a database
+
+Parameters:
+  VpcCidr:
+    Description: "CIDR block for the VPC."
+    Type: String
+    Default: "10.0.0.0/16"
+  PublicSubnetCidr:
+    Description: "CIDR block for the public subnet."
+    Type: String
+    Default: "10.0.1.0/24"
+  PrivateSubnetCidr:
+    Description: "CIDR block for the private subnet."
+    Type: String
+    Default: "10.0.2.0/24"
+  InstanceType:
+    Description: "EC2 instance type"
+    Type: String
+    Default: "t2.micro"
+  KeyName:
+    Description: "Name of an existing EC2 KeyPair to enable SSH access to the instance"
+    Type: AWS::EC2::KeyPair::KeyName
+  DBInstanceClass:
+    Description: "The database instance type"
+    Type: String
+    Default: "db.t2.micro"
+  DBName:
+    Description: "The database name"
+    Type: String
+    Default: "mydatabase"
+  DBUser:
+    Description: "The database admin account username"
+    Type: String
+  DBPassword:
+    Description: "The database admin account password"
+    Type: String
+    NoEcho: true  
+
+Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref PublicSubnetCidr
+      MapPublicIpOnLaunch: true
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref PrivateSubnetCidr
+      MapPublicIpOnLaunch: false
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for EC2 instance"
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  MyEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      SecurityGroups: [ !Ref EC2SecurityGroup ]
+      KeyName: !Ref KeyName
+      ImageId: "ami-12345678" # Replace with a valid AMI ID
+      SubnetId: !Ref PublicSubnet
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Update the instance
+          apt-get update -y
+          apt-get upgrade -y
+
+          # Install NGINX
+          apt-get install -y nginx
+
+          # Start NGINX
+          systemctl start nginx
+          systemctl enable nginx
+
+          # Install AWS CodeDeploy Agent
+          cd /home/ubuntu
+          apt-get install -y ruby wget
+          wget https://aws-codedeploy-${AWS::Region}.s3.amazonaws.com/latest/install
+          chmod +x ./install
+          ./install auto
+          service codedeploy-agent start
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "Subnet Group for RDS Instance"
+      SubnetIds:
+        - !Ref PrivateSubnet
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for RDS DB Instance"
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: "5432"
+          ToPort: "5432"
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+
+  MyDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: "20"
+      DBName: !Ref DBName
+      Engine: "postgres"
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      VPCSecurityGroups: 
+        - !GetAtt DBSecurityGroup.GroupId
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      MultiAZ: false
+      PubliclyAccessible: false
+
+Outputs:
+  PublicIpAddress:
+    Description: "Public IP address of the EC2 instance."
+    Value: !GetAtt MyEC2Instance.PublicIp
+  DatabaseAddress:
+    Description: "The connection endpoint for the database."
+    Value: !GetAtt MyDatabase.Endpoint.Address  
